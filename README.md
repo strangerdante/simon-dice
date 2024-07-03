@@ -1,47 +1,44 @@
-# Astro Starter Kit: Minimal
+# 🎮 Juego Simon Dice
 
-```sh
-npm create astro@latest -- --template minimal
-```
+Un juego de Simon Dice hecho con **Tailwind CSS**, **Astro.js** y **Local Storage**.
 
-[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/withastro/astro/tree/latest/examples/minimal)
-[![Open with CodeSandbox](https://assets.codesandbox.io/github/button-edit-lime.svg)](https://codesandbox.io/p/sandbox/github/withastro/astro/tree/latest/examples/minimal)
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/withastro/astro?devcontainer_path=.devcontainer/minimal/devcontainer.json)
+## 🛠️ Tecnologías Utilizadas
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+- **Tailwind CSS**: Para el diseño y estilización del juego.
+- **Astro.js**: Para la estructura y el desarrollo del sitio.
+- **Local Storage**: Para almacenar el nivel máximo alcanzado por el jugador, incluso si el juego se reinicia.
 
-## 🚀 Project Structure
+## 📦 Instalación
 
-Inside of your Astro project, you'll see the following folders and files:
+1. Clona el repositorio:
+   ```bash
+   git clone https://github.com/tu-usuario/juego-simon-dice.git
+   ```
+2. Ve al directorio del proyecto:
+   ```bash
+   cd juego-simon-dice
+   ```
+3. Instala las dependencias:
+   ```bash
+   npm install
+   ```
+4. Ejecuta el proyecto:
+   ```bash
+   npm run start
+   ```
 
-```text
-/
-├── public/
-├── src/
-│   └── pages/
-│       └── index.astro
-└── package.json
-```
+## 🚀 Uso
 
-Astro looks for `.astro` or `.md` files in the `src/pages/` directory. Each page is exposed as a route based on its file name.
+1. Abre el juego en tu navegador:
+   ```bash
+   http://localhost:4321/
+   ```
+2. Sigue las instrucciones en pantalla para jugar.
 
-There's nothing special about `src/components/`, but that's where we like to put any Astro/React/Vue/Svelte/Preact components.
+## 💾 Almacenamiento Local
 
-Any static assets, like images, can be placed in the `public/` directory.
+El juego guarda automáticamente el nivel máximo alcanzado en el **Local Storage** de tu navegador. Esto asegura que tu progreso no se perderá si cierras el juego o actualizas la página.
 
-## 🧞 Commands
+---
 
-All commands are run from the root of the project, from a terminal:
-
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `npm install`             | Installs dependencies                            |
-| `npm run dev`             | Starts local dev server at `localhost:4321`      |
-| `npm run build`           | Build your production site to `./dist/`          |
-| `npm run preview`         | Preview your build locally, before deploying     |
-| `npm run astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `npm run astro -- --help` | Get help using the Astro CLI                     |
-
-## 👀 Want to learn more?
-
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+Hecho con ❤️ por [Jamel](https://github.com/strangerdante)
