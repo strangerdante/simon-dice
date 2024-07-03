@@ -1,6 +1,7 @@
 # 🎮 Juego Simon Dice
 
 Un juego de Simon Dice hecho con **Tailwind CSS**, **Astro.js** y **Local Storage**.
+https://simon-astro.netlify.app
 
 ## 🛠️ Tecnologías Utilizadas
 
