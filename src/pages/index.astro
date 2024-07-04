@@ -103,9 +103,9 @@
       // Función para resaltar un color temporalmente
       function flashColor(color) {
         const element = document.getElementById(color);
-        element.classList.add("neon");
+        element.classList.add("neon", "opacity-50");
         setTimeout(() => {
-          element.classList.remove("neon");
+          element.classList.remove("neon", "opacity-50");
         }, 400);
       }
 
