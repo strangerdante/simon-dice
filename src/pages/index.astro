@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width" />
     <meta name="generator" content={Astro.generator} />
     <title>Astro</title>
+    <style>
+      .neon {
+        box-shadow:
+          0 0 7px #fff,
+          0 0 10px #fff,
+          0 0 21px #fff;
+      }
+    </style>
   </head>
 
   <body
@@ -95,9 +103,9 @@
       // Función para resaltar un color temporalmente
       function flashColor(color) {
         const element = document.getElementById(color);
-        element.classList.add("opacity-50");
+        element.classList.add("neon");
         setTimeout(() => {
-          element.classList.remove("opacity-50");
+          element.classList.remove("neon");
         }, 400);
       }
 
