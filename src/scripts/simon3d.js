@@ -186,6 +186,8 @@ for (const name of COLOR_NAMES) {
     mesh,
     material,
     baseColor,
+    // Color hacia el que se funde (en el modo "Colores que migran" cambia)
+    targetColor: baseColor.clone(),
     glowScale,
     dir,
     glow: 0,
@@ -201,10 +203,61 @@ for (const name of COLOR_NAMES) {
 }
 const padMeshes = COLOR_NAMES.map((n) => pads[n].mesh);
 
-// Grupo del núcleo: botón central, aro, ranuras y anillos apilados.
-// Se escala y se eleva como una sola pieza.
-const coreGroup = new THREE.Group();
-board.add(coreGroup);
+// Los cuadrantes son posiciones fijas ("slots", con el nombre de su color
+// original). `colorAt` dice qué color muestra cada uno ahora mismo; solo
+// cambia en el modo "Colores que migran".
+const colorAt = Object.fromEntries(COLOR_NAMES.map((n) => [n, n]));
+function slotOf(color) {
+  return COLOR_NAMES.find((slot) => colorAt[slot] === color);
+}
+function setColorAt(slot, color) {
+  colorAt[slot] = color;
+  pads[slot].targetColor.setHex(COLORS[color].hex);
+}
+function resetColors() {
+  for (const slot of COLOR_NAMES) setColorAt(slot, slot);
+}
+
+// Tecla de cada cuadrante, dibujada como una tecla sobre su superficie.
+// Solo aparece cuando se juega con teclado; al tocar/clicar se oculta.
+function keycapTexture(letter) {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const g = c.getContext("2d");
+  g.strokeStyle = "#fff";
+  g.lineWidth = 6;
+  g.beginPath();
+  g.roundRect(10, 10, 108, 108, 22);
+  g.stroke();
+  g.fillStyle = "#fff";
+  g.font = `800 66px system-ui, "Segoe UI", sans-serif`;
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.fillText(letter, 64, 68);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+const keycapGeo = new THREE.PlaneGeometry(0.62, 0.62);
+for (const name of COLOR_NAMES) {
+  const pad = pads[name];
+  const mat = new THREE.MeshBasicMaterial({
+    map: keycapTexture(COLORS[name].key.toUpperCase()),
+    color: new THREE.Color(0.8, 0.8, 0.8), // bajo el umbral del bloom
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+  });
+  const label = new THREE.Mesh(keycapGeo, mat);
+  // Hijo del cuadrante: se hunde con él al pulsar
+  label.position.copy(pad.center).sub(pad.mesh.position).setZ(0.4);
+  label.visible = false;
+  pad.mesh.add(label);
+  pad.keycap = label;
+}
+let keycapsShown = 0;
+let keycapsTarget = 0;
 
 // Botón central con texto dibujado en un canvas
 const textCanvas = document.createElement("canvas");
@@ -227,7 +280,7 @@ const centerButton = new THREE.Mesh(
 centerButton.rotation.x = Math.PI / 2;
 centerButton.rotation.y = Math.PI / 2; // orientar el texto hacia arriba
 centerButton.position.z = 0.2;
-coreGroup.add(centerButton);
+board.add(centerButton);
 
 // Aro luminoso alrededor del botón central
 const ringMat = new THREE.MeshStandardMaterial({
@@ -238,7 +291,7 @@ const ringMat = new THREE.MeshStandardMaterial({
 });
 const ring = new THREE.Mesh(new THREE.TorusGeometry(1.03, 0.035, 16, 128), ringMat);
 ring.position.z = 0.5;
-coreGroup.add(ring);
+board.add(ring);
 
 let centerHover = 0;
 // Muelle de escala del botón central: "rebota" cada vez que cambia el texto
@@ -250,263 +303,91 @@ function popCenter(strength = 4) {
   if (!reduceMotion) centerScaleVel += strength;
 }
 
-// ---------------------------------------------------------------------------
-// Núcleo: cada acierto lanza un fragmento del color pulsado hacia el centro,
-// donde encaja en una ranura del anillo activo. Al completar el nivel el
-// anillo se cierra, se apila bajo el aro y el núcleo crece. Al perder, el
-// núcleo estalla.
-// ---------------------------------------------------------------------------
-
-const CORE_TOP = 0.5; // cara superior del botón central sin crecer
-const LAYER_H = 0.075; // altura que suma cada anillo completado
-const MAX_LAYERS = 8; // anillos visibles; los más antiguos se desvanecen
-const SLOT_R = 1.03; // radio de las ranuras del anillo activo
-const LAYER_R = 1.075; // radio de los anillos apilados (abrazan el lateral)
-const SLOT_GAP = 0.09; // hueco en radianes entre ranuras
-const FRAGMENT_S = reduceMotion ? 0.05 : 0.38; // duración del vuelo
-const MILESTONE = 5; // cada cuántos niveles el núcleo "se carga"
-
-const GHOST = new THREE.Color(0.16, 0.18, 0.24);
-const WHITE = new THREE.Color(1.6, 1.6, 1.6);
-
-// Color de neón con el brillo igualado entre los cuatro tonos
-function neon(name, k = 1) {
-  const c = new THREE.Color(COLORS[name].hex);
-  return c.multiplyScalar(glowScaleOf(c) * k);
+// Tinte del aro: toma el color de cada nota de la secuencia y se desvanece
+// solo de vuelta al blanco.
+const ringTint = new THREE.Color(0xffffff);
+let ringTintAmt = 0;
+let ringTintHold = 0; // segundos que el tinte se mantiene antes de desvanecerse
+function tintRing(hex, hold = 0) {
+  ringTint.setHex(hex);
+  ringTintAmt = 1;
+  ringTintHold = hold;
 }
 
-// Las geometrías de los segmentos se comparten (solo dependen de radio y n)
-const segGeoCache = new Map();
-function segmentGeometry(radius, tube, n) {
-  const key = `${radius}|${tube}|${n}`;
-  if (!segGeoCache.has(key)) {
-    const arc = n === 1 ? Math.PI * 2 : (Math.PI * 2) / n - SLOT_GAP;
-    const segs = Math.max(6, Math.ceil((128 * arc) / (Math.PI * 2)));
-    segGeoCache.set(key, new THREE.TorusGeometry(radius, tube, 10, segs, arc));
-  }
-  return segGeoCache.get(key);
-}
+// Pantalla de cristal sobre el botón central: bisel interior en relieve y
+// un reflejo suave. Va en su propio grupo para seguir al botón al moverse.
+const coreTop = new THREE.Group();
+board.add(coreTop);
+const SCREEN_R = 0.93;
+const bezel = new THREE.Mesh(
+  new THREE.TorusGeometry(SCREEN_R, 0.028, 16, 128),
+  new THREE.MeshStandardMaterial({ color: 0x3a4152, roughness: 0.25, metalness: 0.85 })
+);
+coreTop.add(bezel);
 
-// Las ranuras empiezan arriba y avanzan en sentido horario
-function slotStart(i, n) {
-  return Math.PI / 2 - ((i + 1) * Math.PI * 2) / n + (n === 1 ? 0 : SLOT_GAP / 2);
-}
-function slotCenter(i, n) {
-  return Math.PI / 2 - ((i + 0.5) * Math.PI * 2) / n;
-}
+const glareTexture = (() => {
+  const c = document.createElement("canvas");
+  c.width = c.height = 256;
+  const g = c.getContext("2d");
+  g.beginPath();
+  g.arc(128, 128, 128, 0, Math.PI * 2);
+  g.clip();
+  // Brillo difuso arriba a la izquierda
+  const soft = g.createRadialGradient(80, 62, 0, 80, 62, 150);
+  soft.addColorStop(0, "rgba(255,255,255,0.32)");
+  soft.addColorStop(0.5, "rgba(255,255,255,0.08)");
+  soft.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = soft;
+  g.fillRect(0, 0, 256, 256);
+  // Línea de luz fina siguiendo el borde superior
+  g.strokeStyle = "rgba(255,255,255,0.55)";
+  g.lineWidth = 3;
+  g.shadowColor = "rgba(255,255,255,0.8)";
+  g.shadowBlur = 6;
+  g.beginPath();
+  g.arc(128, 128, 112, Math.PI * 1.08, Math.PI * 1.55);
+  g.stroke();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+})();
+const glare = new THREE.Mesh(
+  new THREE.CircleGeometry(SCREEN_R - 0.02, 96),
+  new THREE.MeshBasicMaterial({
+    map: glareTexture,
+    transparent: true,
+    opacity: 0.55,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  })
+);
+glare.position.z = 0.006;
+coreTop.add(glare);
 
-let coreH = 0; // altura extra actual del núcleo (con muelle)
-let coreHVel = 0;
-let coreHTarget = 0;
+// Arco de progreso: se llena alrededor del centro según aciertas la secuencia
+const progressMat = new THREE.MeshBasicMaterial({
+  color: new THREE.Color().setRGB(0.2, 0.75, 0.35),
+  side: THREE.DoubleSide,
+});
+const progressArc = new THREE.Mesh(new THREE.BufferGeometry(), progressMat);
+progressArc.position.z = 0.53;
+progressArc.rotation.z = Math.PI / 2; // empieza arriba
+progressArc.scale.x = -1; // avanza en sentido horario
+board.add(progressArc);
+let progressShown = 0;
+let progressTarget = 0;
+let progressBuilt = -1;
 
-// --- Anillo activo: una ranura por cada color de la secuencia -------------
-
-const activeRing = new THREE.Group();
-activeRing.position.z = 0.53;
-coreGroup.add(activeRing);
-let slots = []; // { mesh, color, fill, flash }
-let ringId = 0; // cambia al reconstruir: invalida fragmentos en vuelo
-
-function buildActiveRing(n) {
-  ringId++;
-  for (const s of slots) {
-    activeRing.remove(s.mesh);
-    s.mesh.material.dispose();
-  }
-  slots = [];
-  for (let i = 0; i < n; i++) {
-    const mesh = new THREE.Mesh(
-      segmentGeometry(SLOT_R, 0.055, n),
-      new THREE.MeshBasicMaterial({ color: GHOST.clone(), transparent: true, opacity: 0.45 })
-    );
-    mesh.rotation.z = slotStart(i, n);
-    activeRing.add(mesh);
-    slots.push({ mesh, color: null, fill: 0, flash: 0 });
-  }
-}
-
-// Posición de una ranura en coordenadas del tablero
-function slotPosition(i, out = new THREE.Vector3()) {
-  const a = slotCenter(i, slots.length);
-  out.set(Math.cos(a) * SLOT_R, Math.sin(a) * SLOT_R, activeRing.position.z);
-  return out.applyMatrix4(coreGroup.matrix); // coreGroup es hijo directo de board
-}
-
-function updateSlots(dt) {
-  for (const s of slots) {
-    s.fill = damp(s.fill, s.color ? 1 : 0, 12, dt);
-    s.flash = damp(s.flash, 0, 6, dt);
-    const m = s.mesh.material;
-    m.color.copy(GHOST);
-    if (s.color) m.color.lerp(s.color, s.fill);
-    m.color.lerp(WHITE, s.flash);
-    m.opacity = 0.45 + 0.55 * Math.max(s.fill, s.flash);
-  }
-}
-
-// --- Fragmentos que vuelan desde el cuadrante a su ranura ----------------
-
-const fragGeo = new THREE.OctahedronGeometry(0.1, 0);
-const fragments = [];
-const fragCtrl = new THREE.Vector3();
-const fragTarget = new THREE.Vector3();
-
-function launchFragment(name, from, slot) {
-  const mesh = new THREE.Mesh(fragGeo, new THREE.MeshBasicMaterial({ color: neon(name, 2.4) }));
-  const start = from.clone();
-  start.z = Math.max(start.z, 0.6);
-  mesh.position.copy(start);
-  board.add(mesh);
-  fragments.push({ mesh, name, start, slot, id: ringId, t: 0 });
-}
-
-function removeFragment(f) {
-  board.remove(f.mesh);
-  f.mesh.material.dispose();
-}
-
-function updateFragments(dt) {
-  for (let k = fragments.length - 1; k >= 0; k--) {
-    const f = fragments[k];
-    // Si el anillo cambió (game over, reinicio) el fragmento ya no tiene destino
-    if (f.id !== ringId || !slots[f.slot]) {
-      removeFragment(f);
-      fragments.splice(k, 1);
-      continue;
-    }
-    f.t = Math.min(1, f.t + dt / FRAGMENT_S);
-    slotPosition(f.slot, fragTarget);
-    // Curva de Bézier: sube en arco y cae sobre la ranura
-    fragCtrl.copy(f.start).lerp(fragTarget, 0.5);
-    fragCtrl.z += 1.1;
-    const e = f.t * f.t * (3 - 2 * f.t);
-    const u = 1 - e;
-    f.mesh.position
-      .copy(f.start).multiplyScalar(u * u)
-      .addScaledVector(fragCtrl, 2 * u * e)
-      .addScaledVector(fragTarget, e * e);
-    f.mesh.rotation.x += dt * 9;
-    f.mesh.rotation.y += dt * 7;
-    f.mesh.scale.setScalar(1 - 0.4 * e);
-    if (!reduceMotion) emit(f.mesh.position, COLORS[f.name].hex, 1, 0.25);
-
-    if (f.t >= 1) {
-      const s = slots[f.slot];
-      s.color = neon(f.name, 1.5);
-      s.flash = 0.8;
-      ripple(fragTarget, COLORS[f.name].hex, 0.1, 0.7, 0.35, 0.7);
-      emit(fragTarget, COLORS[f.name].hex, 10, 1.2);
-      ringKick = Math.max(ringKick, 0.6);
-      removeFragment(f);
-      fragments.splice(k, 1);
-    }
-  }
-}
-
-// --- Anillos apilados: la historia de la partida -------------------------
-
-const layers = []; // { group, names, z, scale, glow, dying, life }
-
-function aliveLayers() {
-  return layers.filter((l) => !l.dying);
-}
-
-// Convierte el anillo activo completo en una capa del núcleo
-function absorbActiveRing(names) {
-  const n = names.length;
-  const group = new THREE.Group();
-  names.forEach((name, i) => {
-    const mesh = new THREE.Mesh(
-      segmentGeometry(LAYER_R, 0.032, n),
-      new THREE.MeshBasicMaterial({ color: neon(name), transparent: true })
-    );
-    mesh.rotation.z = slotStart(i, n);
-    mesh.userData.base = neon(name);
-    group.add(mesh);
-  });
-  coreGroup.add(group);
-  layers.push({
-    group,
-    names,
-    z: activeRing.position.z, // nace donde estaba el anillo activo
-    scale: SLOT_R / LAYER_R,
-    glow: 1.2,
-    dying: false,
-    life: 1,
-  });
-  buildActiveRing(0);
-
-  const alive = aliveLayers();
-  if (alive.length > MAX_LAYERS) alive[0].dying = true;
-  coreHTarget = Math.min(alive.length, MAX_LAYERS) * LAYER_H;
-  ripple(ORIGIN, 0xffffff, 1.05, 2.4, 0.55, 0.45);
-  ringKick = 1.4;
-  popCenter(3);
-}
-
-// Cada MILESTONE niveles el núcleo se "carga": una ola de luz lo recorre
-function chargeCore() {
-  aliveLayers().forEach((l, i) => later(() => (l.glow = 1.6), i * 55));
-  for (const name of COLOR_NAMES) emit(ORIGIN, COLORS[name].hex, 18, 2.8);
-  ripple(ORIGIN, 0xffffff, 1.1, 4.6, 0.9, 0.6);
-}
-
-// Game over: las capas salen despedidas en chispas de sus colores
-function shatterCore() {
-  const p = new THREE.Vector3();
-  for (const l of aliveLayers()) {
-    const n = l.names.length;
-    l.names.forEach((name, i) => {
-      const a = slotCenter(i, n);
-      p.set(Math.cos(a) * LAYER_R, Math.sin(a) * LAYER_R, l.z);
-      emit(p, COLORS[name].hex, Math.max(3, Math.ceil(24 / n)), 2.6);
-    });
-    l.dying = true;
-  }
-  coreHTarget = 0;
-  buildActiveRing(0);
-}
-
-function updateLayers(dt) {
-  const alive = aliveLayers();
-  for (let k = layers.length - 1; k >= 0; k--) {
-    const l = layers[k];
-    if (l.dying) {
-      l.life -= dt * 2.5;
-      l.scale += dt * 0.6; // se abren hacia afuera mientras se apagan
-      if (l.life <= 0) {
-        coreGroup.remove(l.group);
-        l.group.children.forEach((m) => m.material.dispose());
-        layers.splice(k, 1);
-        continue;
-      }
-    } else {
-      // La capa más reciente queda justo bajo el aro; las demás debajo
-      const fromTop = alive.length - 1 - alive.indexOf(l);
-      const zTarget = CORE_TOP + coreH - (fromTop + 0.5) * LAYER_H;
-      l.z = damp(l.z, zTarget, 12, dt);
-      l.scale = damp(l.scale, 1, 10, dt);
-    }
-    l.glow = damp(l.glow, 0, 2.2, dt);
-    l.group.position.z = l.z;
-    l.group.scale.set(l.scale, l.scale, 1);
-    const brightness = 0.75 + l.glow * 1.6;
-    for (const m of l.group.children) {
-      m.material.color.copy(m.userData.base).multiplyScalar(brightness).lerp(ERROR_RED, redness * 0.6);
-      m.material.opacity = Math.max(0, l.life);
-    }
-  }
-}
-
-function updateCore(dt) {
-  [coreH, coreHVel] = spring(coreH, coreHVel, coreHTarget, 160, 14, dt);
-  centerButton.scale.y = (0.6 + coreH) / 0.6;
-  centerButton.position.z = 0.2 + coreH / 2;
-  ring.position.z = CORE_TOP + coreH;
-  activeRing.position.z = CORE_TOP + 0.03 + coreH;
-  updateSlots(dt);
-  updateFragments(dt);
-  updateLayers(dt);
+function updateProgressArc() {
+  if (Math.abs(progressShown - progressBuilt) < 0.002) return;
+  progressBuilt = progressShown;
+  progressArc.geometry.dispose();
+  progressArc.visible = progressShown > 0.004;
+  if (!progressArc.visible) return;
+  progressArc.geometry = new THREE.TorusGeometry(
+    1.03, 0.055, 12, Math.max(8, Math.ceil(128 * progressShown)),
+    Math.PI * 2 * progressShown
+  );
 }
 
 // Ondas expansivas (al pulsar, al pasar de nivel, en game over…)
@@ -560,6 +441,12 @@ function drawCenter(title, subtitle = "", color = "#cbd5e1") {
   grad.addColorStop(0, "#232836");
   grad.addColorStop(1, "#11141c");
   g.fillStyle = grad;
+  g.fillRect(0, 0, 512, 512);
+  // Sombra interior en el borde: la pantalla queda hundida bajo el bisel
+  const inner = g.createRadialGradient(256, 256, 190, 256, 256, 236);
+  inner.addColorStop(0, "rgba(0,0,0,0)");
+  inner.addColorStop(1, "rgba(0,0,0,0.6)");
+  g.fillStyle = inner;
   g.fillRect(0, 0, 512, 512);
 
   g.textAlign = "center";
@@ -652,16 +539,53 @@ function updateParticles(dt) {
 // Sonido
 // ---------------------------------------------------------------------------
 
-const sounds = {};
-for (const name of COLOR_NAMES) {
-  sounds[name] = new Audio(`${BASE}sounds/${COLORS[name].sound}`);
+// Web Audio: los sonidos se decodifican una vez y se reproducen sin retraso,
+// pudiendo solaparse cuando se pulsa rápido.
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+const audioCtx = AudioCtx ? new AudioCtx() : null;
+const masterGain = audioCtx?.createGain();
+masterGain?.connect(audioCtx.destination);
+const buffers = {};
+
+async function loadSound(key, file) {
+  try {
+    const res = await fetch(`${BASE}sounds/${file}`);
+    buffers[key] = await audioCtx.decodeAudioData(await res.arrayBuffer());
+  } catch {}
 }
-sounds.error = new Audio(`${BASE}sounds/error.wav`);
+if (audioCtx) {
+  for (const name of COLOR_NAMES) loadSound(name, COLORS[name].sound);
+  loadSound("error", "error.wav");
+}
+
+// Los navegadores exigen un gesto del usuario para activar el audio
+function unlockAudio() {
+  if (audioCtx?.state === "suspended") audioCtx.resume();
+}
+addEventListener("pointerdown", unlockAudio, true);
+addEventListener("keydown", unlockAudio, true);
+
+let muted = localStorage.getItem("muted") === "1";
+const muteBtn = document.getElementById("muteBtn");
+
+function setMuted(value) {
+  muted = value;
+  localStorage.setItem("muted", muted ? "1" : "0");
+  if (masterGain) masterGain.gain.value = muted ? 0 : 1;
+  muteBtn.setAttribute("aria-pressed", String(muted));
+  muteBtn.setAttribute("aria-label", muted ? "Activar sonido" : "Silenciar sonido");
+  muteBtn.dataset.muted = String(muted);
+}
+setMuted(muted);
+muteBtn.addEventListener("click", () => setMuted(!muted));
 
 function playSound(name) {
-  const s = sounds[name];
-  s.currentTime = 0;
-  s.play().catch(() => {});
+  const buffer = buffers[name];
+  if (muted || !buffer) return;
+  const src = audioCtx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(masterGain);
+  src.start();
 }
 
 // ---------------------------------------------------------------------------
@@ -683,7 +607,7 @@ function flashColor(name, { strength = 1, ms = FLASH_MS, light = true } = {}) {
   if (light) {
     // La luz se coloca sobre el cuadrante (no sobre el centro, que se sobreexponía)
     flashLight.position.copy(board.localToWorld(pad.center.clone().setZ(2.2)));
-    flashLight.color.setHex(COLORS[name].hex);
+    flashLight.color.setHex(COLORS[colorAt[name]].hex);
     flashIntensity = pad.glowScale * strength;
   }
 }
@@ -691,17 +615,6 @@ function flashColor(name, { strength = 1, ms = FLASH_MS, light = true } = {}) {
 // Golpe físico del cuadrante: se hunde de golpe y rebota
 function punchPad(name, force = 4) {
   if (!reduceMotion) pads[name].vz -= force;
-}
-
-// Ola de luz en sentido horario (al completar un nivel)
-const CLOCKWISE = ["red", "blue", "yellow", "green"];
-function wave(delay = 70) {
-  CLOCKWISE.forEach((name, i) => {
-    later(() => {
-      flashColor(name, { strength: 0.55, ms: 160, light: false });
-      punchPad(name, 1.5);
-    }, i * delay);
-  });
 }
 
 // Fogonazo rojo en los bordes de la pantalla
@@ -735,13 +648,31 @@ function celebrateRecord() {
 // Lógica del juego
 // ---------------------------------------------------------------------------
 
+// Modos de juego
+const MODES = {
+  classic: { name: "Clásico", unit: "Nivel" },
+  migrate: { name: "Colores que migran", unit: "Nivel" },
+  impostor: { name: "El Impostor", unit: "Ronda" },
+};
+const IMPOSTOR_LEN = 5; // en El Impostor la secuencia no crece
+
+let mode = localStorage.getItem("mode");
+if (!(mode in MODES)) mode = "classic";
+
+// El récord se guarda por modo (el clásico conserva la clave original)
+const recordKey = (m) => (m === "classic" ? "maxLevel" : `maxLevel:${m}`);
+
 let sequence = [];
 let playerSequence = [];
 let level = 0;
-let maxLevel = Number(localStorage.getItem("maxLevel")) || 0;
-// idle: esperando inicio · showing: mostrando secuencia · input: turno del jugador · over: perdió
+let maxLevel = Number(localStorage.getItem(recordKey(mode))) || 0;
+// idle: esperando inicio · showing: mostrando secuencia · input: turno del jugador
+// paused: pestaña oculta mientras se mostraba la secuencia · over: perdió
 let state = "idle";
 let timers = [];
+let levelDone = false; // el nivel actual ya se superó (esperando el siguiente)
+let replay = null; // vuelve a mostrar lo de este nivel (tras una pausa)
+let impostor = null; // { color, changed }: el color que entró y la secuencia resultante
 
 function later(fn, ms) {
   timers.push(setTimeout(fn, ms));
@@ -759,6 +690,9 @@ function updateMaxLevel() {
   maxLevelDisplay.textContent = `Nivel máximo alcanzado: ${maxLevel}`;
 }
 
+const randomColor = () => COLOR_NAMES[Math.floor(Math.random() * 4)];
+const unit = () => MODES[mode].unit;
+
 let recordAtStart = 0; // récord al empezar la partida (para celebrar al superarlo)
 
 function startGame() {
@@ -766,6 +700,7 @@ function startGame() {
   sequence = [];
   level = 0;
   rednessTarget = 0;
+  resetColors();
   recordAtStart = maxLevel;
   ringKick = 1.5;
   ripple(ORIGIN, 0xffffff, 1.05, 3.8, 0.7, 0.5);
@@ -775,90 +710,187 @@ function startGame() {
 function nextLevel() {
   level++;
   playerSequence = [];
-  sequence.push(COLOR_NAMES[Math.floor(Math.random() * 4)]);
-  buildActiveRing(sequence.length);
+  progressTarget = 0;
+  levelDone = false;
+  if (mode === "impostor") {
+    impostorRound();
+    return;
+  }
+  sequence.push(randomColor());
+  replay = (leadIn = LEAD_IN_MS) =>
+    playSequence(sequence, {
+      leadIn,
+      onDone: mode === "migrate" ? migrateThenInput : () => startInput("Tu turno"),
+    });
   drawCenter(`Nivel ${level}`, "Observa");
   announce(`Nivel ${level}. Observa la secuencia.`);
-  playSequence();
+  replay();
 }
 
-// Reproduce la secuencia; el jugador no puede pulsar hasta que termine
-function playSequence() {
+// Muestra un color: se enciende el cuadrante donde está ahora
+function showColor(color) {
+  const slot = slotOf(color);
+  flashColor(slot);
+  playSound(color);
+  punchPad(slot, 2.5);
+  ripple(pads[slot].center, COLORS[color].hex, 0.2, 1.3, 0.5, 0.5);
+  ringKick = 0.8; // el aro marca el ritmo de la secuencia
+  tintRing(COLORS[color].hex);
+}
+
+// Reproduce una secuencia; el jugador no puede pulsar hasta que termine
+function playSequence(seq, { leadIn = LEAD_IN_MS, step = STEP_MS, onDone }) {
   state = "showing";
-  sequence.forEach((name, i) => {
-    later(() => {
-      flashColor(name);
-      playSound(name);
-      punchPad(name, 2.5);
-      ripple(pads[name].center, COLORS[name].hex, 0.2, 1.3, 0.5, 0.5);
-      ringKick = 0.8; // el aro marca el ritmo de la secuencia
-      if (slots[i]) slots[i].flash = 0.7; // y la ranura que le corresponde
-    }, LEAD_IN_MS + i * STEP_MS);
-  });
-  later(() => {
-    state = "input";
-    drawCenter(`Nivel ${level}`, "Tu turno");
-    announce("Tu turno.");
-    ringKick = 1.2;
-  }, LEAD_IN_MS + (sequence.length - 1) * STEP_MS + FLASH_MS);
+  seq.forEach((color, i) => later(() => showColor(color), leadIn + i * step));
+  later(onDone, leadIn + (seq.length - 1) * step + FLASH_MS);
 }
 
-// `origin`: punto del tablero donde se hizo clic (con teclado, el centro del cuadrante)
-function handlePlayerInput(name, origin = pads[name].center) {
+function startInput(subtitle) {
+  state = "input";
+  drawCenter(`${unit()} ${level}`, subtitle);
+  announce(`${subtitle}.`);
+  ringKick = 1.2;
+}
+
+// --- Colores que migran: tras ver la secuencia, los colores cambian de
+// cuadrante fundiéndose. Hay que recordar el color, no la posición.
+function migrateThenInput() {
+  const swaps = level >= 5 ? 2 : 1;
+  const before = { ...colorAt };
+  const next = { ...before };
+  do {
+    Object.assign(next, before);
+    for (let k = 0; k < swaps; k++) {
+      const a = randomColor();
+      let b = randomColor();
+      while (b === a) b = randomColor();
+      [next[a], next[b]] = [next[b], next[a]];
+    }
+  } while (COLOR_NAMES.every((slot) => next[slot] === before[slot]));
+  for (const slot of COLOR_NAMES) setColorAt(slot, next[slot]);
+  drawCenter(`Nivel ${level}`, "¡Se mueven!");
+  announce("Los colores cambian de sitio.");
+  ringKick = 1;
+  later(() => startInput("Tu turno"), 900);
+}
+
+// --- El Impostor: la secuencia no crece. Cada ronda se repite con una nota
+// cambiada y hay que tocar el color que entró. La versión cambiada pasa a
+// ser la nueva referencia para la ronda siguiente.
+function impostorRound() {
+  const first = sequence.length === 0;
+  if (first) sequence = Array.from({ length: IMPOSTOR_LEN }, randomColor);
+  const idx = Math.floor(Math.random() * sequence.length);
+  let color = randomColor();
+  while (color === sequence[idx]) color = randomColor();
+  const changed = sequence.slice();
+  changed[idx] = color;
+  impostor = { color, changed };
+  // Cada ronda un poco más rápida
+  const step = Math.max(450, STEP_MS - (level - 1) * 25);
+
+  const showChanged = (leadIn) => {
+    drawCenter(`Ronda ${level}`, "¿Qué cambió?");
+    announce("Otra vez. Una nota ha cambiado.");
+    playSequence(changed, { leadIn, step, onDone: () => startInput("¿Cuál entró?") });
+  };
+  replay = (leadIn = LEAD_IN_MS) => {
+    if (!first) return showChanged(leadIn);
+    drawCenter("Ronda 1", "Memoriza");
+    announce("Memoriza la secuencia.");
+    playSequence(sequence, {
+      leadIn,
+      step,
+      onDone: () => showChanged(1000),
+    });
+  };
+  replay();
+}
+
+// Si la pestaña se oculta mientras se muestra la secuencia (o entre niveles),
+// se detiene todo; al volver se repite lo de este nivel desde el principio.
+// En el turno del jugador no hace falta: no hay límite de tiempo.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    if (state === "showing") {
+      clearTimers();
+      state = "paused";
+      announce("Juego en pausa.");
+    }
+  } else if (state === "paused") {
+    if (levelDone) {
+      nextLevel();
+      return;
+    }
+    playerSequence = [];
+    progressTarget = 0;
+    drawCenter(`${unit()} ${level}`, "Otra vez");
+    announce(`${unit()} ${level}. Repetimos.`);
+    replay(1100); // un margen extra para volver a situarse
+  }
+});
+
+// `slot`: cuadrante pulsado. `origin`: punto del clic (con teclado, su centro)
+function handlePlayerInput(slot, origin = pads[slot].center) {
   // Durante la secuencia el cuadrante solo "tiembla" para indicar que está bloqueado
   if (state === "showing") {
-    punchPad(name, 1);
+    punchPad(slot, 1);
     return;
   }
   if (state !== "input") return;
 
-  playerSequence.push(name);
-  const i = playerSequence.length - 1;
-  if (playerSequence[i] !== sequence[i]) {
-    flashColor(name);
-    punchPad(name, 5);
+  const color = colorAt[slot];
+  const correct =
+    mode === "impostor"
+      ? color === impostor.color
+      : color === sequence[playerSequence.length];
+  if (!correct) {
+    flashColor(slot);
+    punchPad(slot, 5);
     gameOver();
     return;
   }
 
-  flashColor(name);
-  playSound(name);
-  punchPad(name, 4.5);
+  playerSequence.push(color);
+  flashColor(slot);
+  playSound(color);
+  punchPad(slot, 4.5);
   vibrate(15);
-  emit(origin, COLORS[name].hex, 22, 1.8);
-  ripple(origin, COLORS[name].hex, 0.2, 1.6, 0.45);
-  launchFragment(name, origin, i);
+  emit(origin, COLORS[color].hex, 22, 1.8);
+  ripple(origin, COLORS[color].hex, 0.2, 1.6, 0.45);
   ringKick = 0.6;
 
-  if (playerSequence.length === sequence.length) {
-    state = "showing";
-    const newRecord = level > maxLevel;
-    if (newRecord) {
-      maxLevel = level;
-      localStorage.setItem("maxLevel", maxLevel);
-      updateMaxLevel();
-    }
-    // Se espera a que el último fragmento encaje para cerrar el anillo
-    const names = [...sequence];
-    const closeAt = FRAGMENT_S * 1000 + 150;
-    later(() => {
-      absorbActiveRing(names);
-      wave();
-      // Se celebra solo la primera vez que se supera el récord anterior
-      if (newRecord && recordAtStart > 0 && level === recordAtStart + 1) {
-        drawCenter("¡Récord!", `Nivel ${level}`, "#fde047");
-        celebrateRecord();
-        vibrate([20, 40, 20]);
-      } else if (level % MILESTONE === 0) {
-        drawCenter("¡Núcleo!", `${level} anillos`, "#93c5fd");
-        chargeCore();
-        vibrate([15, 30, 15]);
-      } else {
-        drawCenter("¡Bien!", `Nivel ${level} completado`, "#86efac");
-      }
-    }, closeAt);
-    later(nextLevel, closeAt + 950);
+  if (mode === "impostor") {
+    progressTarget = 1;
+    sequence = impostor.changed; // la versión cambiada es la nueva referencia
+    levelComplete("¡Pillado!");
+    return;
   }
+  progressTarget = playerSequence.length / sequence.length;
+  if (playerSequence.length === sequence.length) levelComplete("¡Bien!");
+}
+
+function levelComplete(cheer) {
+  state = "showing";
+  levelDone = true;
+  const newRecord = level > maxLevel;
+  if (newRecord) {
+    maxLevel = level;
+    localStorage.setItem(recordKey(mode), maxLevel);
+    updateMaxLevel();
+  }
+  later(() => {
+    // Se celebra solo la primera vez que se supera el récord anterior
+    if (newRecord && recordAtStart > 0 && level === recordAtStart + 1) {
+      drawCenter("¡Récord!", `${unit()} ${level}`, "#fde047");
+      celebrateRecord();
+      vibrate([20, 40, 20]);
+    } else {
+      const done = unit() === "Ronda" ? "completada" : "completado";
+      drawCenter(cheer, `${unit()} ${level} ${done}`, "#86efac");
+    }
+  }, 180);
+  later(nextLevel, 1100);
 }
 
 function gameOver() {
@@ -868,9 +900,9 @@ function gameOver() {
   vibrate([80, 50, 160]);
   freeze = 0.12; // pausa dramática antes de la explosión
   drawCenter("GAME OVER", "Toca para reiniciar", "#f87171");
-  announce(`Fin del juego en el nivel ${level}. Pulsa Enter para reiniciar.`);
+  announce(`Fin del juego en ${unit().toLowerCase()} ${level}. Pulsa Enter para reiniciar.`);
   rednessTarget = 1;
-  shatterCore();
+  progressTarget = 0;
   shake = reduceMotion ? 0 : 0.3;
   flashLight.position.set(0, 0, 3);
   flashLight.color.copy(ERROR_RED);
@@ -885,6 +917,68 @@ function gameOver() {
   sequence = [];
   playerSequence = [];
 }
+
+// --- Menú de modos (botón hamburguesa) ---
+const menuBtn = document.getElementById("menuBtn");
+const modeMenu = document.getElementById("modeMenu");
+const modeLabel = document.getElementById("modeLabel");
+const modeItems = [...modeMenu.querySelectorAll("[data-mode]")];
+
+// Cambiar de modo deja el juego esperando a empezar
+function setMode(next) {
+  mode = next;
+  localStorage.setItem("mode", mode);
+  clearTimers();
+  state = "idle";
+  sequence = [];
+  playerSequence = [];
+  level = 0;
+  progressTarget = 0;
+  rednessTarget = 0;
+  resetColors();
+  maxLevel = Number(localStorage.getItem(recordKey(mode))) || 0;
+  updateMaxLevel();
+  modeLabel.textContent = MODES[mode].name;
+  for (const item of modeItems) {
+    item.setAttribute("aria-checked", String(item.dataset.mode === mode));
+  }
+  drawCenter("COMENZAR", mode === "classic" ? "" : MODES[mode].name);
+  announce(`Modo ${MODES[mode].name}. Pulsa Enter o toca el centro para comenzar.`);
+}
+
+function setMenuOpen(open) {
+  modeMenu.hidden = !open;
+  menuBtn.setAttribute("aria-expanded", String(open));
+  if (open) (modeItems.find((b) => b.dataset.mode === mode) || modeItems[0]).focus();
+}
+const menuOpen = () => !modeMenu.hidden;
+
+menuBtn.addEventListener("click", () => setMenuOpen(!menuOpen()));
+for (const item of modeItems) {
+  item.addEventListener("click", () => {
+    setMode(item.dataset.mode);
+    setMenuOpen(false);
+    menuBtn.focus();
+  });
+}
+// Clic fuera del menú: cerrarlo (sin que ese clic cuente en el tablero)
+addEventListener(
+  "pointerdown",
+  (e) => {
+    if (menuOpen() && !modeMenu.contains(e.target) && !menuBtn.contains(e.target)) {
+      setMenuOpen(false);
+      e.stopPropagation();
+    }
+  },
+  true
+);
+modeMenu.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  e.preventDefault();
+  const i = modeItems.indexOf(document.activeElement);
+  const d = e.key === "ArrowDown" ? 1 : -1;
+  modeItems[(i + d + modeItems.length) % modeItems.length].focus();
+});
 
 function canStart() {
   return state === "idle" || state === "over";
@@ -930,6 +1024,7 @@ canvas.addEventListener("pointerleave", () => {
 });
 
 canvas.addEventListener("pointerdown", (e) => {
+  keycapsTarget = 0; // se juega con ratón/táctil: ocultar las teclas
   setPointer(e);
   const target = pick();
   if (target === "center") {
@@ -945,7 +1040,22 @@ const KEY_TO_COLOR = Object.fromEntries(
 
 addEventListener("keydown", (e) => {
   if (e.repeat) return;
+  // Con el menú abierto no se juega; Escape lo cierra
+  if (menuOpen()) {
+    if (e.key === "Escape") {
+      setMenuOpen(false);
+      menuBtn.focus();
+    }
+    return;
+  }
+  if (e.key.toLowerCase() === "m") {
+    setMuted(!muted);
+    return;
+  }
+  // Enter/Espacio sobre un botón (p. ej. silencio) no deben iniciar la partida
+  if (e.target instanceof HTMLButtonElement && (e.key === "Enter" || e.key === " ")) return;
   const name = KEY_TO_COLOR[e.key.toLowerCase()];
+  if (name || e.key === "Enter" || e.key === " ") keycapsTarget = 1;
   if (name) {
     handlePlayerInput(name);
   } else if ((e.key === "Enter" || e.key === " ") && canStart()) {
@@ -1023,6 +1133,10 @@ function animate() {
     const hoverTarget = hoveredPad === name && state === "input" ? 1 : 0;
     pad.hover = damp(pad.hover, hoverTarget, 12, dt);
 
+    if (!pad.baseColor.equals(pad.targetColor)) {
+      pad.baseColor.lerp(pad.targetColor, 1 - Math.exp(-5 * dt));
+      pad.glowScale = glowScaleOf(pad.baseColor);
+    }
     tmpColor.copy(pad.baseColor).lerp(ERROR_RED, redness);
     pad.material.color.copy(tmpColor);
     pad.material.emissive.copy(tmpColor);
@@ -1035,20 +1149,48 @@ function animate() {
     pad.mesh.position.z = THREE.MathUtils.clamp(pad.z, -0.3, 0.15);
   }
 
+  keycapsShown = damp(keycapsShown, keycapsTarget, 6, dt);
+  for (const name of COLOR_NAMES) {
+    const k = pads[name].keycap;
+    k.material.opacity = keycapsShown * 0.85;
+    k.visible = keycapsShown > 0.01;
+  }
+
   centerHover = damp(centerHover, hoveringCenter && canStart() ? 1 : 0, 10, dt);
-  coreGroup.position.z = centerHover * 0.06;
+  centerButton.position.z = 0.2 + centerHover * 0.06;
+  ring.position.z = 0.5 + centerHover * 0.06;
+  progressArc.position.z = 0.53 + centerHover * 0.06;
+  coreTop.position.z = 0.5 + centerHover * 0.06;
 
   [centerScale, centerScaleVel] = spring(centerScale, centerScaleVel, 1, 420, 13, dt);
-  coreGroup.scale.setScalar(centerScale);
+  centerButton.scale.setScalar(centerScale);
+  ring.scale.setScalar(centerScale);
+  coreTop.scale.setScalar(centerScale);
+  progressArc.scale.set(-centerScale, centerScale, centerScale);
+
+  // Tinte del aro (notas de la secuencia)
+  if (ringTintHold > 0) ringTintHold -= dt;
+  else ringTintAmt = damp(ringTintAmt, 0, 3, dt);
 
   // El aro "respira" mientras se espera para empezar y destella con cada golpe
   ringKick = damp(ringKick, 0, 7, dt);
   // (valores bajos a propósito para que el centro no deslumbre)
   const pulse = canStart() ? 0.16 + Math.sin(t * 2.5) * 0.08 : 0.06;
-  ringMat.emissiveIntensity = damp(ringMat.emissiveIntensity, pulse + centerHover * 0.2, 8, dt);
-  ringMat.emissive.setHex(0xffffff).lerp(ERROR_RED, redness).multiplyScalar(1 + ringKick * 0.5);
+  ringMat.emissiveIntensity = damp(
+    ringMat.emissiveIntensity,
+    pulse + centerHover * 0.2 + ringTintAmt * 0.45,
+    8,
+    dt
+  );
+  ringMat.emissive
+    .setHex(0xffffff)
+    .lerp(ringTint, ringTintAmt)
+    .lerp(ERROR_RED, redness)
+    .multiplyScalar(1 + ringKick * 0.5);
+  ringMat.color.setHex(0xb8bec9).lerp(ringTint, ringTintAmt * 0.6);
 
-  updateCore(dt);
+  progressShown = damp(progressShown, progressTarget, 14, dt);
+  updateProgressArc();
   updateRipples(dt);
 
   flashIntensity = damp(flashIntensity, 0, 5, dt);
@@ -1062,9 +1204,7 @@ function animate() {
   requestAnimationFrame(animate);
 }
 
-updateMaxLevel();
-drawCenter("COMENZAR");
-announce("Pulsa Enter o toca el centro para comenzar.");
+setMode(mode);
 animate();
 
 // Solo en desarrollo: acceso al estado desde la consola para depurar
@@ -1076,14 +1216,22 @@ if (import.meta.env.DEV) {
     get sequence() {
       return [...sequence];
     },
+    get impostor() {
+      return impostor;
+    },
+    get colorAt() {
+      return { ...colorAt };
+    },
+    get level() {
+      return level;
+    },
+    setMode,
+    tintRing,
     press: handlePlayerInput,
     flash: flashColor,
     get ripples() {
       return ripples.filter((r) => r.mesh.visible).map((r) => r.mesh.position.toArray());
     },
     padCenter: (n) => pads[n].center.toArray(),
-    get core() {
-      return { layers: aliveLayers().length, height: coreH, slots: slots.map((x) => !!x.color) };
-    },
   };
 }

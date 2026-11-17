@@ -5,6 +5,51 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="generator" content={Astro.generator} />
     <title>Simón Dice 3D</title>
+    <style is:global>
+      .mode-item {
+        display: block;
+        width: 100%;
+        padding: 0.65rem 0.75rem 0.65rem 1.75rem;
+        border-radius: 0.75rem;
+        text-align: left;
+        position: relative;
+        transition: background-color 0.15s;
+      }
+      .mode-item:hover,
+      .mode-item:focus-visible {
+        background: rgb(255 255 255 / 0.07);
+        outline: none;
+      }
+      /* Punto que marca el modo activo */
+      .mode-item::before {
+        content: "";
+        position: absolute;
+        left: 0.7rem;
+        top: 1.05rem;
+        width: 0.45rem;
+        height: 0.45rem;
+        border-radius: 999px;
+        border: 1.5px solid rgb(255 255 255 / 0.3);
+      }
+      .mode-item[aria-checked="true"]::before {
+        background: #fff;
+        border-color: #fff;
+        box-shadow: 0 0 8px rgb(255 255 255 / 0.7);
+      }
+      .mode-name {
+        display: block;
+        font-weight: 600;
+        font-size: 0.9rem;
+        color: #f1f5f9;
+      }
+      .mode-desc {
+        display: block;
+        margin-top: 0.15rem;
+        font-size: 0.75rem;
+        line-height: 1.35;
+        color: #9ca3af;
+      }
+    </style>
   </head>
 
   <body class="bg-[#0b0d14] text-white overflow-hidden select-none">
@@ -22,17 +67,80 @@
 
     <header class="pointer-events-none fixed top-0 inset-x-0 p-6 text-center">
       <h1 class="text-xs tracking-[0.35em] uppercase text-gray-400">
-        Simón dice
+        Simón dice · <span id="modeLabel">Clásico</span>
       </h1>
       <p id="maxLevelDisplay" class="mt-1 text-lg font-semibold">
         Nivel máximo alcanzado: 0
       </p>
     </header>
 
+    <!-- Menú de modos de juego -->
+    <div class="fixed top-4 left-4 z-20">
+      <button
+        id="menuBtn"
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded="false"
+        aria-controls="modeMenu"
+        aria-label="Modos de juego"
+        title="Modos de juego"
+        class="grid h-11 w-11 place-items-center rounded-full border border-white/10 bg-white/5 text-gray-300 backdrop-blur transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/60"
+      >
+        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <path d="M4 7h16M4 12h16M4 17h16" />
+        </svg>
+      </button>
+
+      <div
+        id="modeMenu"
+        role="menu"
+        aria-label="Modos de juego"
+        hidden
+        class="absolute left-0 top-14 w-72 rounded-2xl border border-white/10 bg-[#141824]/95 p-2 shadow-2xl shadow-black/60 backdrop-blur"
+      >
+        <p class="px-3 pt-2 pb-1 text-[0.65rem] tracking-[0.3em] uppercase text-gray-500">
+          Modos
+        </p>
+        <button type="button" role="menuitemradio" aria-checked="true" data-mode="classic" class="mode-item">
+          <span class="mode-name">Clásico</span>
+          <span class="mode-desc">Repite la secuencia, que crece una nota por nivel.</span>
+        </button>
+        <button type="button" role="menuitemradio" aria-checked="false" data-mode="migrate" class="mode-item">
+          <span class="mode-name">Colores que migran</span>
+          <span class="mode-desc">Tras verla, los colores cambian de sitio. Recuerda el color, no la posición.</span>
+        </button>
+        <button type="button" role="menuitemradio" aria-checked="false" data-mode="impostor" class="mode-item">
+          <span class="mode-name">El Impostor</span>
+          <span class="mode-desc">La secuencia se repite con una nota cambiada. Toca el color que entró.</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Silenciar / activar sonido (tecla M) -->
+    <button
+      id="muteBtn"
+      type="button"
+      aria-pressed="false"
+      aria-label="Silenciar sonido"
+      title="Sonido (M)"
+      class="group fixed top-4 right-4 z-10 grid h-11 w-11 place-items-center rounded-full border border-white/10 bg-white/5 text-gray-300 backdrop-blur transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/60"
+    >
+      <svg class="h-5 w-5 group-data-[muted=true]:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M11 5 6 9H2v6h4l5 4V5z" />
+        <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+        <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+      </svg>
+      <svg class="hidden h-5 w-5 group-data-[muted=true]:block" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M11 5 6 9H2v6h4l5 4V5z" />
+        <path d="m22 9-6 6" />
+        <path d="m16 9 6 6" />
+      </svg>
+    </button>
+
     <p
       class="pointer-events-none fixed bottom-0 inset-x-0 p-6 text-center text-xs text-gray-500"
     >
-      Toca el centro para empezar · Teclado: Q W A S (Enter para empezar)
+      Toca el centro para empezar · Teclado: Q W A S (Enter para empezar · M sonido)
     </p>
 
     <!-- Estado del juego para lectores de pantalla -->
