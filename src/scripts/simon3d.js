@@ -201,6 +201,11 @@ for (const name of COLOR_NAMES) {
 }
 const padMeshes = COLOR_NAMES.map((n) => pads[n].mesh);
 
+// Grupo del núcleo: botón central, aro, ranuras y anillos apilados.
+// Se escala y se eleva como una sola pieza.
+const coreGroup = new THREE.Group();
+board.add(coreGroup);
+
 // Botón central con texto dibujado en un canvas
 const textCanvas = document.createElement("canvas");
 textCanvas.width = textCanvas.height = 512;
@@ -222,7 +227,7 @@ const centerButton = new THREE.Mesh(
 centerButton.rotation.x = Math.PI / 2;
 centerButton.rotation.y = Math.PI / 2; // orientar el texto hacia arriba
 centerButton.position.z = 0.2;
-board.add(centerButton);
+coreGroup.add(centerButton);
 
 // Aro luminoso alrededor del botón central
 const ringMat = new THREE.MeshStandardMaterial({
@@ -233,7 +238,7 @@ const ringMat = new THREE.MeshStandardMaterial({
 });
 const ring = new THREE.Mesh(new THREE.TorusGeometry(1.03, 0.035, 16, 128), ringMat);
 ring.position.z = 0.5;
-board.add(ring);
+coreGroup.add(ring);
 
 let centerHover = 0;
 // Muelle de escala del botón central: "rebota" cada vez que cambia el texto
@@ -245,30 +250,263 @@ function popCenter(strength = 4) {
   if (!reduceMotion) centerScaleVel += strength;
 }
 
-// Arco de progreso: se llena alrededor del centro según aciertas la secuencia
-const progressMat = new THREE.MeshBasicMaterial({
-  color: new THREE.Color().setRGB(0.2, 0.75, 0.35),
-  side: THREE.DoubleSide,
-});
-const progressArc = new THREE.Mesh(new THREE.BufferGeometry(), progressMat);
-progressArc.position.z = 0.53;
-progressArc.rotation.z = Math.PI / 2; // empieza arriba
-progressArc.scale.x = -1; // avanza en sentido horario
-board.add(progressArc);
-let progressShown = 0;
-let progressTarget = 0;
-let progressBuilt = -1;
+// ---------------------------------------------------------------------------
+// Núcleo: cada acierto lanza un fragmento del color pulsado hacia el centro,
+// donde encaja en una ranura del anillo activo. Al completar el nivel el
+// anillo se cierra, se apila bajo el aro y el núcleo crece. Al perder, el
+// núcleo estalla.
+// ---------------------------------------------------------------------------
 
-function updateProgressArc() {
-  if (Math.abs(progressShown - progressBuilt) < 0.002) return;
-  progressBuilt = progressShown;
-  progressArc.geometry.dispose();
-  progressArc.visible = progressShown > 0.004;
-  if (!progressArc.visible) return;
-  progressArc.geometry = new THREE.TorusGeometry(
-    1.03, 0.055, 12, Math.max(8, Math.ceil(128 * progressShown)),
-    Math.PI * 2 * progressShown
-  );
+const CORE_TOP = 0.5; // cara superior del botón central sin crecer
+const LAYER_H = 0.075; // altura que suma cada anillo completado
+const MAX_LAYERS = 8; // anillos visibles; los más antiguos se desvanecen
+const SLOT_R = 1.03; // radio de las ranuras del anillo activo
+const LAYER_R = 1.075; // radio de los anillos apilados (abrazan el lateral)
+const SLOT_GAP = 0.09; // hueco en radianes entre ranuras
+const FRAGMENT_S = reduceMotion ? 0.05 : 0.38; // duración del vuelo
+const MILESTONE = 5; // cada cuántos niveles el núcleo "se carga"
+
+const GHOST = new THREE.Color(0.16, 0.18, 0.24);
+const WHITE = new THREE.Color(1.6, 1.6, 1.6);
+
+// Color de neón con el brillo igualado entre los cuatro tonos
+function neon(name, k = 1) {
+  const c = new THREE.Color(COLORS[name].hex);
+  return c.multiplyScalar(glowScaleOf(c) * k);
+}
+
+// Las geometrías de los segmentos se comparten (solo dependen de radio y n)
+const segGeoCache = new Map();
+function segmentGeometry(radius, tube, n) {
+  const key = `${radius}|${tube}|${n}`;
+  if (!segGeoCache.has(key)) {
+    const arc = n === 1 ? Math.PI * 2 : (Math.PI * 2) / n - SLOT_GAP;
+    const segs = Math.max(6, Math.ceil((128 * arc) / (Math.PI * 2)));
+    segGeoCache.set(key, new THREE.TorusGeometry(radius, tube, 10, segs, arc));
+  }
+  return segGeoCache.get(key);
+}
+
+// Las ranuras empiezan arriba y avanzan en sentido horario
+function slotStart(i, n) {
+  return Math.PI / 2 - ((i + 1) * Math.PI * 2) / n + (n === 1 ? 0 : SLOT_GAP / 2);
+}
+function slotCenter(i, n) {
+  return Math.PI / 2 - ((i + 0.5) * Math.PI * 2) / n;
+}
+
+let coreH = 0; // altura extra actual del núcleo (con muelle)
+let coreHVel = 0;
+let coreHTarget = 0;
+
+// --- Anillo activo: una ranura por cada color de la secuencia -------------
+
+const activeRing = new THREE.Group();
+activeRing.position.z = 0.53;
+coreGroup.add(activeRing);
+let slots = []; // { mesh, color, fill, flash }
+let ringId = 0; // cambia al reconstruir: invalida fragmentos en vuelo
+
+function buildActiveRing(n) {
+  ringId++;
+  for (const s of slots) {
+    activeRing.remove(s.mesh);
+    s.mesh.material.dispose();
+  }
+  slots = [];
+  for (let i = 0; i < n; i++) {
+    const mesh = new THREE.Mesh(
+      segmentGeometry(SLOT_R, 0.055, n),
+      new THREE.MeshBasicMaterial({ color: GHOST.clone(), transparent: true, opacity: 0.45 })
+    );
+    mesh.rotation.z = slotStart(i, n);
+    activeRing.add(mesh);
+    slots.push({ mesh, color: null, fill: 0, flash: 0 });
+  }
+}
+
+// Posición de una ranura en coordenadas del tablero
+function slotPosition(i, out = new THREE.Vector3()) {
+  const a = slotCenter(i, slots.length);
+  out.set(Math.cos(a) * SLOT_R, Math.sin(a) * SLOT_R, activeRing.position.z);
+  return out.applyMatrix4(coreGroup.matrix); // coreGroup es hijo directo de board
+}
+
+function updateSlots(dt) {
+  for (const s of slots) {
+    s.fill = damp(s.fill, s.color ? 1 : 0, 12, dt);
+    s.flash = damp(s.flash, 0, 6, dt);
+    const m = s.mesh.material;
+    m.color.copy(GHOST);
+    if (s.color) m.color.lerp(s.color, s.fill);
+    m.color.lerp(WHITE, s.flash);
+    m.opacity = 0.45 + 0.55 * Math.max(s.fill, s.flash);
+  }
+}
+
+// --- Fragmentos que vuelan desde el cuadrante a su ranura ----------------
+
+const fragGeo = new THREE.OctahedronGeometry(0.1, 0);
+const fragments = [];
+const fragCtrl = new THREE.Vector3();
+const fragTarget = new THREE.Vector3();
+
+function launchFragment(name, from, slot) {
+  const mesh = new THREE.Mesh(fragGeo, new THREE.MeshBasicMaterial({ color: neon(name, 2.4) }));
+  const start = from.clone();
+  start.z = Math.max(start.z, 0.6);
+  mesh.position.copy(start);
+  board.add(mesh);
+  fragments.push({ mesh, name, start, slot, id: ringId, t: 0 });
+}
+
+function removeFragment(f) {
+  board.remove(f.mesh);
+  f.mesh.material.dispose();
+}
+
+function updateFragments(dt) {
+  for (let k = fragments.length - 1; k >= 0; k--) {
+    const f = fragments[k];
+    // Si el anillo cambió (game over, reinicio) el fragmento ya no tiene destino
+    if (f.id !== ringId || !slots[f.slot]) {
+      removeFragment(f);
+      fragments.splice(k, 1);
+      continue;
+    }
+    f.t = Math.min(1, f.t + dt / FRAGMENT_S);
+    slotPosition(f.slot, fragTarget);
+    // Curva de Bézier: sube en arco y cae sobre la ranura
+    fragCtrl.copy(f.start).lerp(fragTarget, 0.5);
+    fragCtrl.z += 1.1;
+    const e = f.t * f.t * (3 - 2 * f.t);
+    const u = 1 - e;
+    f.mesh.position
+      .copy(f.start).multiplyScalar(u * u)
+      .addScaledVector(fragCtrl, 2 * u * e)
+      .addScaledVector(fragTarget, e * e);
+    f.mesh.rotation.x += dt * 9;
+    f.mesh.rotation.y += dt * 7;
+    f.mesh.scale.setScalar(1 - 0.4 * e);
+    if (!reduceMotion) emit(f.mesh.position, COLORS[f.name].hex, 1, 0.25);
+
+    if (f.t >= 1) {
+      const s = slots[f.slot];
+      s.color = neon(f.name, 1.5);
+      s.flash = 0.8;
+      ripple(fragTarget, COLORS[f.name].hex, 0.1, 0.7, 0.35, 0.7);
+      emit(fragTarget, COLORS[f.name].hex, 10, 1.2);
+      ringKick = Math.max(ringKick, 0.6);
+      removeFragment(f);
+      fragments.splice(k, 1);
+    }
+  }
+}
+
+// --- Anillos apilados: la historia de la partida -------------------------
+
+const layers = []; // { group, names, z, scale, glow, dying, life }
+
+function aliveLayers() {
+  return layers.filter((l) => !l.dying);
+}
+
+// Convierte el anillo activo completo en una capa del núcleo
+function absorbActiveRing(names) {
+  const n = names.length;
+  const group = new THREE.Group();
+  names.forEach((name, i) => {
+    const mesh = new THREE.Mesh(
+      segmentGeometry(LAYER_R, 0.032, n),
+      new THREE.MeshBasicMaterial({ color: neon(name), transparent: true })
+    );
+    mesh.rotation.z = slotStart(i, n);
+    mesh.userData.base = neon(name);
+    group.add(mesh);
+  });
+  coreGroup.add(group);
+  layers.push({
+    group,
+    names,
+    z: activeRing.position.z, // nace donde estaba el anillo activo
+    scale: SLOT_R / LAYER_R,
+    glow: 1.2,
+    dying: false,
+    life: 1,
+  });
+  buildActiveRing(0);
+
+  const alive = aliveLayers();
+  if (alive.length > MAX_LAYERS) alive[0].dying = true;
+  coreHTarget = Math.min(alive.length, MAX_LAYERS) * LAYER_H;
+  ripple(ORIGIN, 0xffffff, 1.05, 2.4, 0.55, 0.45);
+  ringKick = 1.4;
+  popCenter(3);
+}
+
+// Cada MILESTONE niveles el núcleo se "carga": una ola de luz lo recorre
+function chargeCore() {
+  aliveLayers().forEach((l, i) => later(() => (l.glow = 1.6), i * 55));
+  for (const name of COLOR_NAMES) emit(ORIGIN, COLORS[name].hex, 18, 2.8);
+  ripple(ORIGIN, 0xffffff, 1.1, 4.6, 0.9, 0.6);
+}
+
+// Game over: las capas salen despedidas en chispas de sus colores
+function shatterCore() {
+  const p = new THREE.Vector3();
+  for (const l of aliveLayers()) {
+    const n = l.names.length;
+    l.names.forEach((name, i) => {
+      const a = slotCenter(i, n);
+      p.set(Math.cos(a) * LAYER_R, Math.sin(a) * LAYER_R, l.z);
+      emit(p, COLORS[name].hex, Math.max(3, Math.ceil(24 / n)), 2.6);
+    });
+    l.dying = true;
+  }
+  coreHTarget = 0;
+  buildActiveRing(0);
+}
+
+function updateLayers(dt) {
+  const alive = aliveLayers();
+  for (let k = layers.length - 1; k >= 0; k--) {
+    const l = layers[k];
+    if (l.dying) {
+      l.life -= dt * 2.5;
+      l.scale += dt * 0.6; // se abren hacia afuera mientras se apagan
+      if (l.life <= 0) {
+        coreGroup.remove(l.group);
+        l.group.children.forEach((m) => m.material.dispose());
+        layers.splice(k, 1);
+        continue;
+      }
+    } else {
+      // La capa más reciente queda justo bajo el aro; las demás debajo
+      const fromTop = alive.length - 1 - alive.indexOf(l);
+      const zTarget = CORE_TOP + coreH - (fromTop + 0.5) * LAYER_H;
+      l.z = damp(l.z, zTarget, 12, dt);
+      l.scale = damp(l.scale, 1, 10, dt);
+    }
+    l.glow = damp(l.glow, 0, 2.2, dt);
+    l.group.position.z = l.z;
+    l.group.scale.set(l.scale, l.scale, 1);
+    const brightness = 0.75 + l.glow * 1.6;
+    for (const m of l.group.children) {
+      m.material.color.copy(m.userData.base).multiplyScalar(brightness).lerp(ERROR_RED, redness * 0.6);
+      m.material.opacity = Math.max(0, l.life);
+    }
+  }
+}
+
+function updateCore(dt) {
+  [coreH, coreHVel] = spring(coreH, coreHVel, coreHTarget, 160, 14, dt);
+  centerButton.scale.y = (0.6 + coreH) / 0.6;
+  centerButton.position.z = 0.2 + coreH / 2;
+  ring.position.z = CORE_TOP + coreH;
+  activeRing.position.z = CORE_TOP + 0.03 + coreH;
+  updateSlots(dt);
+  updateFragments(dt);
+  updateLayers(dt);
 }
 
 // Ondas expansivas (al pulsar, al pasar de nivel, en game over…)
@@ -537,8 +775,8 @@ function startGame() {
 function nextLevel() {
   level++;
   playerSequence = [];
-  progressTarget = 0;
   sequence.push(COLOR_NAMES[Math.floor(Math.random() * 4)]);
+  buildActiveRing(sequence.length);
   drawCenter(`Nivel ${level}`, "Observa");
   announce(`Nivel ${level}. Observa la secuencia.`);
   playSequence();
@@ -554,6 +792,7 @@ function playSequence() {
       punchPad(name, 2.5);
       ripple(pads[name].center, COLORS[name].hex, 0.2, 1.3, 0.5, 0.5);
       ringKick = 0.8; // el aro marca el ritmo de la secuencia
+      if (slots[i]) slots[i].flash = 0.7; // y la ranura que le corresponde
     }, LEAD_IN_MS + i * STEP_MS);
   });
   later(() => {
@@ -588,7 +827,7 @@ function handlePlayerInput(name, origin = pads[name].center) {
   vibrate(15);
   emit(origin, COLORS[name].hex, 22, 1.8);
   ripple(origin, COLORS[name].hex, 0.2, 1.6, 0.45);
-  progressTarget = playerSequence.length / sequence.length;
+  launchFragment(name, origin, i);
   ringKick = 0.6;
 
   if (playerSequence.length === sequence.length) {
@@ -599,18 +838,26 @@ function handlePlayerInput(name, origin = pads[name].center) {
       localStorage.setItem("maxLevel", maxLevel);
       updateMaxLevel();
     }
+    // Se espera a que el último fragmento encaje para cerrar el anillo
+    const names = [...sequence];
+    const closeAt = FRAGMENT_S * 1000 + 150;
     later(() => {
+      absorbActiveRing(names);
       wave();
       // Se celebra solo la primera vez que se supera el récord anterior
       if (newRecord && recordAtStart > 0 && level === recordAtStart + 1) {
         drawCenter("¡Récord!", `Nivel ${level}`, "#fde047");
         celebrateRecord();
         vibrate([20, 40, 20]);
+      } else if (level % MILESTONE === 0) {
+        drawCenter("¡Núcleo!", `${level} anillos`, "#93c5fd");
+        chargeCore();
+        vibrate([15, 30, 15]);
       } else {
         drawCenter("¡Bien!", `Nivel ${level} completado`, "#86efac");
       }
-    }, 180);
-    later(nextLevel, 1100);
+    }, closeAt);
+    later(nextLevel, closeAt + 950);
   }
 }
 
@@ -623,7 +870,7 @@ function gameOver() {
   drawCenter("GAME OVER", "Toca para reiniciar", "#f87171");
   announce(`Fin del juego en el nivel ${level}. Pulsa Enter para reiniciar.`);
   rednessTarget = 1;
-  progressTarget = 0;
+  shatterCore();
   shake = reduceMotion ? 0 : 0.3;
   flashLight.position.set(0, 0, 3);
   flashLight.color.copy(ERROR_RED);
@@ -789,14 +1036,10 @@ function animate() {
   }
 
   centerHover = damp(centerHover, hoveringCenter && canStart() ? 1 : 0, 10, dt);
-  centerButton.position.z = 0.2 + centerHover * 0.06;
-  ring.position.z = 0.5 + centerHover * 0.06;
-  progressArc.position.z = 0.53 + centerHover * 0.06;
+  coreGroup.position.z = centerHover * 0.06;
 
   [centerScale, centerScaleVel] = spring(centerScale, centerScaleVel, 1, 420, 13, dt);
-  centerButton.scale.setScalar(centerScale);
-  ring.scale.setScalar(centerScale);
-  progressArc.scale.set(-centerScale, centerScale, centerScale);
+  coreGroup.scale.setScalar(centerScale);
 
   // El aro "respira" mientras se espera para empezar y destella con cada golpe
   ringKick = damp(ringKick, 0, 7, dt);
@@ -805,8 +1048,7 @@ function animate() {
   ringMat.emissiveIntensity = damp(ringMat.emissiveIntensity, pulse + centerHover * 0.2, 8, dt);
   ringMat.emissive.setHex(0xffffff).lerp(ERROR_RED, redness).multiplyScalar(1 + ringKick * 0.5);
 
-  progressShown = damp(progressShown, progressTarget, 14, dt);
-  updateProgressArc();
+  updateCore(dt);
   updateRipples(dt);
 
   flashIntensity = damp(flashIntensity, 0, 5, dt);
@@ -840,5 +1082,8 @@ if (import.meta.env.DEV) {
       return ripples.filter((r) => r.mesh.visible).map((r) => r.mesh.position.toArray());
     },
     padCenter: (n) => pads[n].center.toArray(),
+    get core() {
+      return { layers: aliveLayers().length, height: coreH, slots: slots.map((x) => !!x.color) };
+    },
   };
 }
